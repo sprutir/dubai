@@ -1,1 +1,109 @@
 
+public with sharing class S3ImageUploader {
+    private static final String awsKey = '###########';
+    private static final String awsSecret = '##########';
+    private static final String regionName = '############';
+    private static final String bucketName = '###################';
+    private static final String service = 's3';
+    private static final String algorithm = 'AWS4-HMAC-SHA256';
+    private static final String hostName = bucketName + '.s3.amazonaws.com';
+
+    @AuraEnabled
+    public static String filePUT(String recordId, String fileName, String base64Data) {
+        String resultMessage;
+        try {
+            system.debug('===> Starting filePUT');
+
+            // Set object key with folder path
+            String s3ObjectKey = 'Listing_s3/' + fileName.toLowerCase() + '.jpeg';
+            String endpointUrl = 'https://' + hostName + '/' + s3ObjectKey;
+
+            String longDate = Datetime.now().formatGMT('E, dd MMM yyyy HH:mm:ss z');
+            String formattedDateString = Datetime.now().formatGMT('yyyyMMdd\'T\'HHmmss\'Z\'');
+            String dateStamp = Datetime.now().formatGMT('yyyyMMdd');
+
+            system.debug('===> Endpoint URL: ' + endpointUrl);
+
+            Blob fileBlob = EncodingUtil.base64Decode(base64Data);
+            String contentHash = EncodingUtil.convertToHex(Crypto.generateDigest('SHA-256', fileBlob));
+
+            HttpRequest req = new HttpRequest();
+            req.setEndpoint(endpointUrl);
+            req.setMethod('PUT');
+            req.setHeader('Host', hostName);
+            req.setHeader('x-amz-date', formattedDateString);
+            req.setHeader('x-amz-content-sha256', contentHash);
+            req.setHeader('Content-Type', 'image/jpeg');
+            req.setBodyAsBlob(fileBlob);
+
+            String authHeader = createAuthHeaderForPUT(s3ObjectKey, formattedDateString, contentHash, dateStamp, fileBlob);
+            req.setHeader('Authorization', authHeader);
+
+            system.debug('===> Authorization Header: ' + authHeader);
+
+            Http http = new Http();
+            HttpResponse res = http.send(req);
+
+            system.debug('===> Response Status: ' + res.getStatus());
+            system.debug('===> Response Code: ' + res.getStatusCode());
+            system.debug('===> Response Body: ' + res.getBody());
+
+            if (res.getStatusCode() == 200 || res.getStatusCode() == 201) {
+                system.debug('successfully call api');
+                resultMessage = 'https://my-dubai-real-estate.s3.eu-north-1.amazonaws.com/'+s3ObjectKey;
+            } else {
+                resultMessage =null;
+            }
+        } catch (Exception ex) {
+            system.debug('===> Exception: ' + ex.getMessage() + ' at line ' + ex.getLineNumber());
+            resultMessage =null;
+        }
+        return resultMessage;
+    }
+
+    private static String createAuthHeaderForPUT(String s3ObjectKey, String formattedDateString, String contentHash, String dateStamp, Blob fileBlob) {
+        String canonicalUri = '/' + s3ObjectKey;
+        String canonicalHeaders =
+            'host:' + hostName + '\n' +
+            'x-amz-content-sha256:' + contentHash + '\n' +
+            'x-amz-date:' + formattedDateString + '\n';
+        String signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+
+        String canonicalRequest = 'PUT\n' +
+            canonicalUri + '\n' +
+            '\n' +
+            canonicalHeaders + '\n' +
+            signedHeaders + '\n' +
+            contentHash;
+
+        system.debug('===> Canonical Request: ' + canonicalRequest);
+
+        Blob canonicalRequestHash = Crypto.generateDigest('SHA-256', Blob.valueOf(canonicalRequest));
+        String canonicalRequestHashString = EncodingUtil.convertToHex(canonicalRequestHash);
+
+        String stringToSign = algorithm + '\n' +
+            formattedDateString + '\n' +
+            dateStamp + '/' + regionName + '/' + service + '/aws4_request\n' +
+            canonicalRequestHashString;
+
+        system.debug('===> String To Sign: ' + stringToSign);
+
+        // Generate signing key
+        Blob kSecret = Crypto.generateMac('HmacSHA256', Blob.valueOf(dateStamp), Blob.valueOf('AWS4' + awsSecret));
+        Blob kRegion = Crypto.generateMac('HmacSHA256', Blob.valueOf(regionName), kSecret);
+        Blob kService = Crypto.generateMac('HmacSHA256', Blob.valueOf(service), kRegion);
+        Blob kSigning = Crypto.generateMac('HmacSHA256', Blob.valueOf('aws4_request'), kService);
+
+        Blob signatureBlob = Crypto.generateMac('HmacSHA256', Blob.valueOf(stringToSign), kSigning);
+        String signature = EncodingUtil.convertToHex(signatureBlob);
+
+        String authorizationHeader = algorithm + ' ' +
+            'Credential=' + awsKey + '/' + dateStamp + '/' + regionName + '/' + service + '/aws4_request, ' +
+            'SignedHeaders=' + signedHeaders + ', ' +
+            'Signature=' + signature;
+
+        system.debug('===> Authorization Header Final: ' + authorizationHeader);
+
+        return authorizationHeader;
+    }
+}
